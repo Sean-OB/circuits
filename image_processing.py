@@ -8,6 +8,24 @@ from skimage.draw import circle_perimeter
 from skimage.util import img_as_ubyte
 from skimage.filters import median
 
+def find_circles(file_name, show_circles=False):
+    """Performs the full process of identifying circles in an image.
+    file_name is a string pointing to the location of a parseable image
+    
+    Returns a list of Circles. 
+    """
+    image = bw_image(file_name)
+    color_image = plt.imread(file_name)
+    color_image.setflags(write=1)
+    circles = circle_hough(image)
+    if show_circles:
+        for circ in circles:
+            cy, cx = circle_perimeter(circ.y, circ.x, circ.radius)
+            color_image[cy, cx] = (220, 20, 20)
+        show(color_image)
+    return circles
+
+
 def contrastify(arr, midpoint=None):
     """
     Takes a numpy array and returns a new one separated at a midpoint, mapping smaller values to zero and larger ones to a maximum value.
@@ -44,7 +62,7 @@ def show_plot(file_name):
     image = bw_image(file_name)
     show(contrastify(edgify(image)))
 
-def find_circles(image, max_circles=10):
+def circle_hough(image, max_circles=10):
     """ Uses scikit-image's Hough circle transform to identify circles in an image.
 
     image: numpy image including circles
@@ -84,16 +102,6 @@ def filter_circles(list_of_circles, d=150):
         return final
     return filter_helper(list_of_circles)
     
-def test_hough_circle(file_name):
-    image = bw_image(file_name)
-    color_image = plt.imread(file_name)
-    color_image.setflags(write=1)
-    circles = find_circles(image)
-    for circ in circles:
-        cy, cx = circle_perimeter(circ.y, circ.x, circ.radius)
-        color_image[cy, cx] = (220, 20, 20)
-    show(color_image)
-
 class Circle:
     """A circle has coordinates and a radius."""
 
@@ -111,4 +119,7 @@ class Circle:
 
 simple = './ex_circuits/easy_circuit.jpg'
 two_circles = './ex_circuits/two_circles.jpg'
-test_hough_circle(simple)
+three_circles = './ex_circuits/three_circles.jpg'
+
+# UNCOMMENT THIS LINE TO TEST (you can replace the file name with the others if you prefer)
+#find_circles(three_circles, show_circles=True)
