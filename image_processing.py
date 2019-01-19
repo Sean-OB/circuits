@@ -1,18 +1,20 @@
 import matplotlib.pyplot as plt
 import imageio as img
 import numpy as np
-import cv2 as cv
-import skimage
-from skimage import data, color
-from skimage.transform import hough_circle, hough_circle_peaks, probabilistic_hough_line, hough_line, hough_line_peaks
-from skimage.feature import canny
-from skimage.util import img_as_ubyte
-from skimage.filters import median
+from skimage import draw, feature, filters, morphology, transform, util
 
-def find_all(file_name, show_shapes=False):
+def find_all(file_name, num_sources=10, num_oas=5):
     """Main function of this file. Identifies all structures in an image and returns them
     data structure: TODO """
-    find_shape(file_name, 'circle', show_shapes=show_shapes)
+    image = bw_image(file_name)
+    circles = circle_hough(image, num_sources)
+    lines = line_hough(image)
+    remove_close_to_circles(lines, circles)
+    filtered_lines = consolidate_lines(lines, bw_image(file_name), circles)
+    
+    drawn_image = draw_shapes([filtered_lines, circles], file_name)
+    show(drawn_image)
+
 
 ### MISCELLANEOUS HELPER FUNCTIONS ###
 
@@ -21,9 +23,12 @@ def bw_image(file_name):
     Returns a black and white, contrastified, eroded, smoothed image.
 
     file_name: string file name of an image file to be read."""
-    processed = skimage.morphology.erosion(median(img.imread(file_name, as_gray=True).astype('uint8'), selem=np.array([[0, 1, 0], [1, 0, 1], [0, 1, 0]])))
-    contrastified = contrastify(processed)
-    return contrastified
+    processed = morphology.erosion(filters.median(img.imread(file_name, as_gray=True).astype('uint8')))
+    x_size, y_size = processed.shape
+    # Split up to deal with shadows and changes in light
+    quad1, quad2, quad3, quad4 = processed[0:x_size//2, 0:y_size//2], processed[x_size//2:x_size, 0:y_size//2], processed[0:x_size//2, y_size//2:y_size], processed[x_size//2:x_size, y_size//2:y_size]
+    quad1, quad2, quad3, quad4 = contrastify(quad1), contrastify(quad2), contrastify(quad3), contrastify(quad4)
+    return np.vstack((np.hstack((quad1, quad3)), np.hstack((quad2, quad4))))
 
 def contrastify(arr, midpoint=None):
     """
@@ -33,9 +38,19 @@ def contrastify(arr, midpoint=None):
     midpoint: lower values are mapped to zero, equal or higher values are mapped to max_val
     """
     if not midpoint:
-        midpoint = (np.min(arr) + np.max(arr)) * 0.5
+        midpoint = (np.min(arr) + np.max(arr)) * 0.55
     arr = (arr > midpoint) * 255
     return arr
+
+def draw_shapes(list_of_shapes, file_name):
+    """ Draws all given shapes onto an image.
+    list_of_shapes is a list of shape lists (e.g. a [[all circles], [all lines]]), whose members have a draw function"""
+    color_image = plt.imread(file_name)
+    color_image.setflags(write=1)
+    for shape_type in list_of_shapes:
+        for shape in shape_type:
+            shape.draw(color_image)
+    return color_image
 
 def show_bw(image):
     plt.imshow(image, cmap=plt.cm.gray, interpolation='gaussian')
@@ -54,28 +69,15 @@ def show_plot(file_name):
     image = bw_image(file_name)
     show(contrastify(edgify(image)))
 
-### SHAPE FINDING FUNCTIONS ###
+### POLISHING FUNCTIONS ###
 
-def find_shape(file_name, shape, show_shapes=False):
-    """ Finds all shapeures in an image. Types of structurs:
-    circles: 'circle'
-    lines: 'line'
-    """
-    image = bw_image(file_name)
-    color_image = plt.imread(file_name)
-    color_image.setflags(write=1)
-    if shape == 'circle':
-        shapes = circle_hough(image)
-        disp = disp_circles
-    elif shape == 'line':
-        shapes = line_hough(image)
-        disp = disp_lines
-    elif shape == 'corner':
-        shapes = corner_detection(image)
-        disp = disp_corners
-    if show_shapes:
-        disp(shapes, color_image)
-    return shapes
+def remove_close_to_circles(lines, circles, min_rat=0.6, max_rat=1.4):
+    """ Destructively removes any line that with both endpoints close to the edge of a circle. """
+    to_remove = []
+    for line in lines:
+        if any([circ.coord_close_to_circle(line.coords[0], min_rat, max_rat) and circ.coord_close_to_circle(line.coords[1], min_rat, max_rat) for circ in circles]):
+            to_remove.append(line)
+    [lines.remove(line) for line in to_remove]
 
 ### LINE SECTION ###
 
@@ -86,22 +88,17 @@ def find_lines(file_name, show_lines=False):
 def line_hough(image):
         
     # Find edges
-    """
-    image_bytes = median(img_as_ubyte(image))
-    edges = canny(image, sigma=3, low_threshold=10, high_threshold=50)
-    """
-    edges = canny(image, sigma=0.5, low_threshold=0.2, high_threshold=0.3, use_quantiles=True)
-    line_coords = probabilistic_hough_line(edges, threshold=5, line_length=50, line_gap=15, theta=np.pi * np.arange(-1/2, 1/2, 0.01))
-    lines = [Line(c0[0], c0[1], c1[0], c1[1]) for c0, c1 in line_coords]
+    edges = feature.canny(image, sigma=0.5, low_threshold=0.1, high_threshold=0.2, use_quantiles=True)
+    line_length, line_gap = int(0.02 * np.mean(image.shape)), int(0.0025 * np.mean(image.shape))
+    line_coords = transform.probabilistic_hough_line(edges, threshold=0, line_length=line_length, line_gap=line_gap) 
+    lines = [Line(c0[0], c0[1], c1[0], c1[1]) for c0, c1 in line_coords if not is_edge_line(c0, c1, image)]
     return lines
 
-def disp_lines(lines, color_image):
-    for line in lines:
-        color_image[skimage.draw.line(line.y0, line.x0, line.y1, line.x1)] = (220, 20, 20)
-    print(len(lines))
-    show(color_image)
+def is_edge_line(c0, c1, image, threshold=5):
+    """ Returns whether the two coordinates are close enough to the edge to be eliminated. """
+    return bool(min(c0 + c1) < threshold or max(c0[0], c1[0]) > image.shape[1] - threshold or max(c0[1], c1[1]) > image.shape[0] - threshold)
 
-def consolidate_lines(lines, circles):
+def consolidate_lines(lines, image, circles=[]):
     """ Takes all of the shorter lines returned by the line_hough function and combines them into longer lines.
 
     Input: 
@@ -115,54 +112,80 @@ def consolidate_lines(lines, circles):
               If the lines are of the same angle type, then combine them into one longer wire
                 Then remove the old wires from the list and call the function on the list including the new wire
     """
+    def consolidate_helper(list_of_lines):
+        """ Recursively traverses the list of lines and joins together those which are close together.
+        Returns the final list of lines.
 
-### CORNER SECTION ###
+        TODO: Add functionality for vertical and diagonal lines.
+        (Possibly) add an "absolute minimum distance" function using projections
+        
+        """
+        if len(list_of_lines) == 1:
+            return list_of_lines
+        first_line = list_of_lines.pop(0)
+        closest_line = find_closest_line(list_of_lines, first_line)
+        if closest_line:
+            joined_line = first_line.join_lines(closest_line)
+            list_of_lines.remove(closest_line)
+            list_of_lines.insert(0, joined_line)
+            return consolidate_helper(list_of_lines)
+        else:
+            return [first_line] + consolidate_helper(list_of_lines)
 
-def find_corners(file_name, show_corners=False):
-    """Performs the full process of identifying lines in an image.
-    file_name is a string pointing to the location of a parseable image
-
-    Returns a list of Lines.
-    """
-    return find_shape(file_name, 'corner', show_shapes=show_corners)
-
-
-
-def corner_detection(image):
-    """ Uses scikit-image's probabilistic Hough line transform to identify lines in an image.
-
-    image: numpy image
-
-    Returns a list of Lines
-    """
-    edges = cv.Canny(image, 50, 150, apertureSize=3).astype('uint8')
-    accum = cv.cornerHarris(edges, 20, 31, 0.02)
-    print(accum)
-    print(np.count_nonzero(accum > 0.15 * np.max(accum)))
-    return accum
-    
-
-def filter_lines(hspace, angles, distances):
-    """ Threshold parameter on scikit probabilistic_hough_line does not work.
-    This is a workaround to fit the project (and extra practice with Hough transforms)
-    hspace: 
-    """
-    def length(line):
-        return np.sqrt((line[0] - line[2]) ** 2 + (line[1] - line[3]) ** 2)
+    def find_closest_line(list_of_lines, ref_line):
+        """ Finds the closest line to a given line of the same type. If there is no close line, return None. """
+        if ref_line.angle_type == 'horz':
+            # Rectangle that is width wide from the center of the line in the direction of the first endpoint
+            right_x, left_x= max(ref_line.x0, ref_line.x1), min(ref_line.x0, ref_line.x1)
+            # look is a function that takes coordinates and returns whether they are in the rectangle
+            look = rect((left_x - dist, ref_line.center[1] - width), (right_x + dist, ref_line.center[1] + width))
+        elif ref_line.angle_type == 'vert':
+            top_y, bottom_y  = max(ref_line.y0, ref_line.y1), min(ref_line.y0, ref_line.y1)
+            look = rect((ref_line.center[0] - width, bottom_y - dist), (ref_line.center[0] + width, bottom_y + dist))
+        else:
+            look = trap(ref_line)
+        closest = min([line for line in list_of_lines if line.angle_type == ref_line.angle_type and (look(line.coords[0]) or look(line.coords[1]))], key=lambda lin: ref_line.min_endpoint_dist(lin), default=None)
+        return closest
 
 
-def disp_corners(lines, color_image):
-    """ Displays the detected line segments """
-    color_image[lines > 0.15 * np.max(lines)] = (220, 20, 20)
-    show(color_image)
-    """
-    for line in lines:
-        x1, y1, x2, y2 = line[0]
-        cv.line(color_image, (x1, y1), (x2, y2), color=(220, 20, 20), thickness=5)
-    show(color_image)
-    """
+    def rect(bl_corner, tr_corner):
+        def in_rect(coord):
+            """ Determines if coord is within a rectangle spanned by 2 given corners. All coordinates are given in tuples. """
+            return bl_corner[0] < coord[0] < tr_corner[0] and bl_corner[1] < coord[1] < tr_corner[1]
+        return in_rect
 
-    
+    def trap(ref_line):
+        """ Returns a trapezoidal look function based on the reference line.
+        NOTE: higher y values are lower, due to the nature of numpy arrays.
+        As such, bottom refers to the LOWER of the two points and so on"""
+
+        # Scale width down for diagonal lines
+        diag_width = width // 8
+        bottom, top = max(ref_line.coords, key=lambda x: x[1]), min(ref_line.coords, key=lambda x: x[1])
+        slopes_right = ref_line.slope < 0
+        extension = dist
+        if slopes_right:
+            left_corner = (bottom[0] - diag_width - extension, bottom[1] + extension)
+            right_corner = (top[0] + diag_width + extension, top[1] - extension)
+        else:
+            left_corner = (top[0] - diag_width - extension, top[1] + extension)
+            right_corner = (bottom[0] + diag_width + extension, bottom[1] - extension)
+
+        # These line functions based on y = m(x - x0) + y0
+        left_line = lambda x: ref_line.slope * (x - left_corner[0]) + left_corner[1]
+        right_line = lambda x: ref_line.slope * (x - right_corner[0]) + right_corner[1]
+        def in_trap(coord):
+            # If the sides slope right, then the coord should be below the left line and above the right line; otherwise it is switched
+            bt_top_bot = bottom[1] > coord[1] > top[1]
+            return bt_top_bot and (left_line(coord[0]) > coord[1] > right_line(coord[0]) or (left_line(coord[0]) < coord[1] < right_line(coord[0])))
+        return in_trap
+
+    # Actual body of the function
+    dist, width, min_proportion_filled = int(0.02 * np.mean(image.shape)), int(0.03 * np.mean(image.shape)), 0.2
+    filtered_lines = consolidate_helper(lines)
+    return filtered_lines
+
+### TRIANGLE SECTION ###
 
 ### CIRCLE SECTION ###
 
@@ -174,7 +197,7 @@ def find_circles(file_name, show_circles=False):
     """
     return find_shape(file_name, 'circle', show_shapes=show_circles)
 
-def circle_hough(image, max_circles=15):
+def circle_hough(image, max_circles=100):
     """ Uses scikit-image's Hough circle transform to identify circles in an image.
 
     image: numpy image including circles
@@ -182,20 +205,20 @@ def circle_hough(image, max_circles=15):
     Returns a list of filtered Circles
     """
     # Find edges
-    edges = canny(image, sigma=3, low_threshold=10, high_threshold=50)
-
+    edges = feature.canny(image, sigma=0.5, low_threshold=0.2, high_threshold=0.3, use_quantiles=True)
     # Detect radii through Hough transform
-    rad_range = np.arange(50, 500, 10)
-    accum = hough_circle(edges, rad_range)
-    accums, cx, cy, radii = hough_circle_peaks(accum, rad_range, min_xdistance=100, min_ydistance=100, threshold=0.85*np.max(accum), num_peaks=max_circles)
-    all_circles = [Circle(cx[i], cy[i], radii[i]) for i in range(len(cx))]
-    return filter_circles(all_circles)
+    if max_circles != 100:
+        min_rad, max_rad = int(0.05 * np.mean(image.shape)), 0.1 * np.mean(image.shape)
+    else:
+        min_rad, max_rad = int(0.05 * np.mean(image.shape)), 0.1 * np.mean(image.shape)
 
-def disp_circles(circles, color_image):
-    for circ in circles:
-        cy, cx = skimage.draw.circle_perimeter(circ.y, circ.x, circ.radius)
-        color_image[cy, cx] = (220, 20, 20)
-    show(color_image)
+    rad_range = np.arange(min_rad, max_rad, (max_rad - min_rad) // 20)
+    accum = transform.hough_circle(edges, rad_range)
+    accums, cx, cy, radii = transform.hough_circle_peaks(accum, rad_range, min_xdistance=100, min_ydistance=100, threshold=0.85*np.max(accum), num_peaks=max_circles)
+    all_circles = [Circle(cx[i], cy[i], radii[i]) for i in range(len(cx))]
+    filtered_circles = filter_circles(all_circles)
+    keep_largest = sorted(filtered_circles, key=lambda c: c.radius)[0:max_circles]
+    return keep_largest
 
 def filter_circles(list_of_circles, d=150):
     """ min_xdistance and min_ydistance of hough_circle_peaks do not work; this substitutes for that functionality
@@ -223,15 +246,37 @@ class Circle:
     """A circle has coordinates and a radius."""
 
     def __init__(self, x, y, radius):
-        self.x = x
-        self.y = y
-        self.radius = radius
+        self.x = int(x)
+        self.y = int(y)
+        self.radius = int(radius)
+
+    @property
+    def center_coord(self):
+        """ Returns a tuple of the center coordinates of the circle. """
+        return (self.x, self.y)
 
     def __str__(self):
         return 'x: {0}, y: {1}, r: {2}'.format(self.x, self.y, self.radius)
 
     def distance_to(self, circ2):
         return np.sqrt((self.x - circ2.x) ** 2 + (self.y - circ2.y) ** 2)
+
+    def coord_close_to_circle(self, coord, min_rad_rat, max_rad_rat):
+        """ Returns whether a coordinate is between min_rad_rat * radius and max_rad_rad * radius of the center """
+        assert max_rad_rat >= min_rad_rat, 'Maximum ratio must be larger or equal to the minimum ratio!'
+        return self.radius * min_rad_rat < Line.coord_dist(coord, self.center_coord) < self.radius * max_rad_rat
+
+    def draw(self, image, color=(220, 20, 20)):
+        """ Destructively draws the circle onto a given image. """
+        cy, cx = draw.circle_perimeter(self.y, self.x, self.radius)
+        image[cy, cx] = color
+
+class Coord:
+    """ A 2-dimensional coordinate. """
+    
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
 
 class Line:
     """ A line segment expressed by the Cartesian coordinates of its endpoints"""
@@ -241,35 +286,57 @@ class Line:
         self.y0 = y0
         self.x1 = x1
         self.y1 = y1
+
+    def __str__(self):
+        return '({0}, {1}), ({2}, {3})'.format(self.x0, self.y0, self.x1, self.y1)
+
+    @property
+    def angle(self):
         if self.x0 - self.x1 == 0:
-            self.angle = 90
-            self.type = 'vert'
+            return 90
         else:
-            angle = np.arctan((self.y0 - self.y1) / (self.x0 - self.x1)) * 180 / np.pi
-            if -90 <= angle < -75 or angle >= 52.5:
-                self.angle = 90
-                self.type = 'vert'
-            elif -75 <= angle < -52.5:
-                self.angle = -60
-                self.type = 'neg-diag'
-            elif -52.5 <= angle < -37.5:
-                self.angle = -45
-                self.type = 'neg-diag'
-            elif -37.5 <= angle < -15:
-                self.angle = -30
-                self.type = 'neg-diag'
-            elif -15 <= angle < 15:
-                self.angle = 0
-                self.type = 'horz'
-            elif 15 <= angle < 37.5:
-                self.angle = 30
-                self.type = 'pos-diag'
-            elif 37.5 <= angle < 52.5:
-                self.angle = 45
-                self.type = 'pos-diag'
-            elif 52.5 <= angle < 75:
-                self.angle = 60
-                self.type = 'pos-diag'
+            raw_angle = np.arctan((self.y0 - self.y1) / (self.x0 - self.x1)) * 180 / np.pi
+            if -90 <= raw_angle < -67.5 or raw_angle >= 67.5:
+                return 90
+            elif -67.5 <= raw_angle < -22.5:
+                return -45
+            elif -22.5 <= raw_angle < 22.5:
+                return 0
+            elif 22.5 <= raw_angle < 67.5:
+                return 45
+
+    @property
+    def slope(self):
+        if self.x0 - self.x1 == 0:
+            return float('inf')
+        else:
+            return (self.y0 - self.y1) / (self.x0 - self.x1)
+
+    @property
+    def angle_type(self):
+        if self.angle == 90:
+            return 'vert'
+        elif -67.5 <= self.angle < -22.5:
+            return 'neg-diag'
+        elif -22.5 <= self.angle < 22.5:
+            return 'horz'
+        elif 22.5 <= self.angle < 67.5:
+            return 'pos-diag'
+
+    @property
+    def coords(self):
+        """ Returns the coordinates of endpoints in the format ((x0, y0), (x1, y1)) """
+        return ((self.x0, self.y0), (self.x1, self.y1))
+
+    @property
+    def center(self):
+        return ((self.x0 + self.x1) // 2, (self.y0 + self.y1) // 2)
+
+    @property
+    def length(self):
+        """ Returns the Euclidean length of the line """
+        dx, dy = self.x1 - self.x0, self.y1 - self.y0
+        return np.sqrt(dx ** 2 + dy ** 2)
 
     def from_polar(d0, a0, d1, a1, starting=(0, 0)):
         """ Angles are in radians """
@@ -279,38 +346,86 @@ class Line:
         y1 = starting[1] + d1 * np.sin(a1)
         return Line(x0, y0, x1, y1)
 
-    def length(self):
-        """ Returns the Euclidean length of the line """
-        dx, dy = self.x1 - self.x0, self.y1 - self.y0
-        return np.sqrt(dx ** 2 + dy ** 2)
+    def from_coords(c0, c1):
+        """ Coordinates are an unpackable pair, preferably a tuple """
+        x0, y0 = c0
+        x1, y1 = c1
+        return Line(x0, y0, x1, y1)
 
-    def coords(self):
-        """ Returns the coordinates of endpoints in the format ((x0, y0), (x1, y1)) """
-        return ((self.x0, self.y0), self.x1, self.y1)
-
-    def endpoint_min_dist(self, line):
+    def min_endpoint_dist(self, line):
         """ Returns the minimum distance between the endpoints of two lines """
         dists = []
         for i in range(2):
             for j in range(2):
-                dists += coord_dist(self.coords[i], line.coords[j])
+                dists.append(Line.coord_dist(self.coords[i], line.coords[j]))
         return min(dists)
+
+    def join_lines(self, line):
+        """ Returns the combination of two lines together at their closest endpoint """
+        # Farthest endpoints are formatted as a tuple of coordinate tuples
+        farthest_endpoints = max([self.coords, line.coords], key=lambda cs: Line.coord_dist(cs[0], cs[1]))
+        farthest_distance = Line.coord_dist(farthest_endpoints[0], farthest_endpoints[1])
+        assert self.angle_type == line.angle_type, 'Line angles must be of the same type!'
+        for i in range(2):
+            for j in range(2):
+                if Line.coord_dist(self.coords[i], line.coords[j]) > farthest_distance:
+                    farthest_endpoints = (self.coords[i], line.coords[j])
+                    farthest_distance = Line.coord_dist(self.coords[i], line.coords[j])
+        
+        if self.angle_type == 'horz':
+            avg_y = (farthest_endpoints[0][1] + farthest_endpoints[1][1]) // 2
+            return Line(farthest_endpoints[0][0], avg_y, farthest_endpoints[1][0], avg_y)
+        elif self.angle_type == 'vert':
+            avg_x = (farthest_endpoints[0][0] + farthest_endpoints[1][0]) // 2
+            return Line(avg_x, farthest_endpoints[0][1], avg_x, farthest_endpoints[1][1])
+        else:
+            return Line.from_coords(farthest_endpoints[0], farthest_endpoints[1])
+        
 
     def coord_dist(c0, c1):
         """ c0 and c1 are coordinate tuples of the form (x, y) """
         return np.sqrt((c0[0] - c1[0]) ** 2 + (c0[1] - c1[1]) ** 2)
 
-    def line_min_dist(self, line):
-        """ Returns the minimum Euclidean distance from another line to this one.
-        Note that the minimum distance is the orthogonal projection of the difference vector onto this line."""
+    def draw(self, image, color=(220, 20, 20)):
+        """ Destructively draws line onto an image. """
+        image[draw.line(self.y0, self.x0, self.y1, self.x1)] = color
+
+
+
+class Triangle:
+    """ Represents an equilateral triangle in coordinate space, with a base perp/parallel to the two elementary axes of 2-D space. """
+    def __init__(self, base_line, direction):
+        # Note: direction marks where the vertex opposite the base line points (left, right, up or down)
+        self.base_line = base_line
+        self.direction == direction
+        if base_line.angle_type == 'horz':
+            assert direction in ['up', 'down'], 'Direction must be perpendicular to the base line'
+        elif base_line.angle_type == 'vert':
+            assert direction in ['left', 'right'], 'Direction must be perpendicular to the base line'
+        else:
+            raise AssertionError('Invalid direction')
+        if self.direction == 'up':
+            vertex = (self.base_line.center[0], int(self.base_line.center[1] - self.base_line.length * np.sqrt(3) / 2))
+        elif self.direction == 'down':
+            vertex = (self.base_line.center[0], int(self.base_line.center[1] + self.base_line.length * np.sqrt(3) / 2))
+        elif self.direction == 'left':
+            vertex = (self.base_line.center[0] - int(self.base_line.length * np.sqrt(3) / 2), self.base_line.center[1])
+        elif self.direction == 'right':
+            vertex = (self.base_line.center[0] + int(self.base_line.length * np.sqrt(3) / 2), self.base_line.center[1])
+
+    def draw(self, image, color=(220, 20, 20)):
+        """ Destructively draws the triangle onto the image. """
+        self.base_line.draw(image)
+        Line.from_coords(self.vertex, ref_line.coords[0]).draw(image)
+        Line.from_coords(self.vertex, ref_line.coords[1]).draw(image)
         
 
 
 simple = './ex_circuits/easy_circuit.jpg'
 two_circles = './ex_circuits/two_circles.jpg'
 three_circles = './ex_circuits/three_circles.jpg'
+integrator = './ex_circuits/integrator.jpg'
+differentiator = './ex_circuits/differentiator.jpg'
 
 # UNCOMMENT THIS LINE TO TEST (you can replace the file name with the others if you prefer)
-# find_all(simple, show_shapes=True)
-find_lines(three_circles, show_lines=True)
-#image = bw_image(simple)
+# lines = find_all(differentiator)

@@ -1,0 +1,7 @@
+TO DO
+
+Done 1. Create consolidation function for vertical lines.
+Done 2. Create final consolidation function (i.e. joining perpendicular or diagonal lines)
+3. Implement detection for triangles (op-amps).
+4. Implement finer detection for symbols within triangles and circles
+5. Implement circuit solving algorithm.

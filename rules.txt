@@ -1,0 +1,38 @@
+Goals of the program, in decending order of importance:
+
+1. Given a set of element nodes with some known values, calculate the rest of the values of each node or determine that it is not possible given the input.
+2. Construct a set of element nodes from an electronic diagram of the circuit.
+3. Construct a set of element nodes from a hand-drawn diagram of the circuit.
+4. Construct an electronic diagram of the circuit from a set of element nodes. (Can be used to output results from #1)
+5. If no exact solution can be reached, include a symbolic expression for nodal values in terms of each other.
+6. Include op-amps and capacitors in the system.
+
+Rules for the construction of the nodal graph analysis program:
+
+1. All elements have some input voltage, output voltage, resistance and current at any given point in time.
+2. One wire element must be marked as "ground"; its voltages will be set to zero.
+3. The nodes will be traversed in arbitrary direction beginning at the ground wire, which will be the "base case" for node traversal.
+4. All currents will be converted to positive values with corresponding directions in the final output.
+
+(For development)
+Possible strategies:
+
+Steps to final program:
+	1. Recognition: Convert hand-written diagram to electronic diagram
+	2. Abstraction: Convert electronic diagram to nodal graph elements in python
+	3. Calculation: Symbolically find expressions for each nodal value
+	4. Output: Reconstruct the electronic diagram and label with values
+
+Recognition
+### TO DO ###
+
+Abstraction
+### TO DO ###
+	Detect each element on the graph (store original position for future display)
+
+Calculation
+	Starting from the ground node, recursively traverse the circuit and add each previous node as inputs
+
+Output
+### TO DO ###
+
