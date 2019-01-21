@@ -11,9 +11,11 @@ def find_all(file_name, num_sources=10, num_oas=5):
     lines = line_hough(image)
     remove_close_to_circles(lines, circles)
     filtered_lines = consolidate_lines(lines, bw_image(file_name), circles)
+    triangles = find_triangles(filtered_lines)
     
-    drawn_image = draw_shapes([filtered_lines, circles], file_name)
+    drawn_image = draw_shapes([filtered_lines, circles, triangles], file_name)
     show(drawn_image)
+    return triangles
 
 
 ### MISCELLANEOUS HELPER FUNCTIONS ###
@@ -134,21 +136,26 @@ def consolidate_lines(lines, image, circles=[]):
 
     def find_closest_line(list_of_lines, ref_line):
         """ Finds the closest line to a given line of the same type. If there is no close line, return None. """
-        if ref_line.angle_type == 'horz':
-            # Rectangle that is width wide from the center of the line in the direction of the first endpoint
-            right_x, left_x= max(ref_line.x0, ref_line.x1), min(ref_line.x0, ref_line.x1)
-            # look is a function that takes coordinates and returns whether they are in the rectangle
-            look = rect((left_x - dist, ref_line.center[1] - width), (right_x + dist, ref_line.center[1] + width))
-        elif ref_line.angle_type == 'vert':
-            top_y, bottom_y  = max(ref_line.y0, ref_line.y1), min(ref_line.y0, ref_line.y1)
-            look = rect((ref_line.center[0] - width, bottom_y - dist), (ref_line.center[0] + width, bottom_y + dist))
+        if ref_line.angle_type in ['horz', 'vert']:
+            look = rect(ref_line)
         else:
             look = trap(ref_line)
         closest = min([line for line in list_of_lines if line.angle_type == ref_line.angle_type and (look(line.coords[0]) or look(line.coords[1]))], key=lambda lin: ref_line.min_endpoint_dist(lin), default=None)
         return closest
 
 
-    def rect(bl_corner, tr_corner):
+    def rect(ref_line):
+        """ Returns a rectangular look function based on the reference line."""
+        if ref_line.angle_type == 'horz':
+            # Rectangle that is width wide from the center of the line in the direction of the first endpoint
+            right_x, left_x= max(ref_line.x0, ref_line.x1), min(ref_line.x0, ref_line.x1)
+            # look is a function that takes coordinates and returns whether they are in the rectangle
+            bl_corner = (left_x - dist, ref_line.center[1] - width)
+            tr_corner = (right_x + dist, ref_line.center[1] + width)
+        elif ref_line.angle_type == 'vert':
+            top_y, bottom_y  = max(ref_line.y0, ref_line.y1), min(ref_line.y0, ref_line.y1)
+            bl_corner = (ref_line.center[0] - width, bottom_y - dist)
+            tr_corner = (ref_line.center[0] + width, top_y + dist)
         def in_rect(coord):
             """ Determines if coord is within a rectangle spanned by 2 given corners. All coordinates are given in tuples. """
             return bl_corner[0] < coord[0] < tr_corner[0] and bl_corner[1] < coord[1] < tr_corner[1]
@@ -186,6 +193,78 @@ def consolidate_lines(lines, image, circles=[]):
     return filtered_lines
 
 ### TRIANGLE SECTION ###
+def find_triangles(lines, min_line_length=40, dist_threshold=55):
+    """ Given a list of consolidated lines, return any large triangles within them.
+    Destructively removes any lines which are a part of the triangles."""
+    def closest_line(coord, list_of_lines):
+        """ Returns the line from list_of_lines with an endpoint closest to coord.
+        If there is no line with a sufficiently close endpoint, return None."""
+        closest_endpoint_dist = lambda line: min([Line.coord_dist(coord, c) for c in line.coords])
+        closest_line = min(list_of_lines, key=closest_endpoint_dist)
+        if closest_endpoint_dist(closest_line) <= dist_threshold:
+            return closest_line
+        else:
+            return None
+    def which_side(ref_line, test_line):
+        """Returns which side the test line is on relative to the reference line.
+        If the reference line is horizontal, then the test line could be 'up' or 'down'.
+        If --------------------- vertical, ----------------------------'left' or 'right'."""
+        if ref_line.angle_type == 'horz':
+            dy1, dy2 = test_line.coords[0][1] - ref_line.center[1], test_line.coords[1][1] - ref_line.center[1]
+            farther = max([dy1, dy2], key=abs)
+            if farther > 0:
+                return 'up'
+            else:
+                return 'down'
+        elif ref_line.angle_type == 'vert':
+            dx1, dx2 = test_line.coords[0][0] - ref_line.center[0], test_line.coords[1][0] - ref_line.center[0]
+            farther = max([dx1, dx2], key=abs)
+            if farther > 0:
+                return 'right'
+            else:
+                return 'left'
+
+    def valid_triangle(ref_line, lin1, lin2):
+        """ Returns whether the lines form a valid triangle. """
+        if (not lin1) or (not lin2):
+            return False
+
+        check = lambda side1, side2: (which_side(ref_line, lin1) == side1 and which_side(ref_line, lin2) == side1 and lin1.angle_type == 'pos-diag' and lin2.angle_type == 'neg-diag') or (which_side(ref_line, lin1) == side2 and which_side(ref_line, lin2) == side2 and lin1.angle_type == 'neg-diag' and lin2.angle_type == 'pos-diag')
+        if ref_line.angle_type == 'horz':
+            return check('up', 'down')
+        elif ref_line.angle_type == 'vert':
+            return check('left', 'right')
+
+    triangles, to_remove = [], []
+    long_lines = [line for line in lines if line.length >= min_line_length]
+    vs = [line for line in long_lines if line.angle_type == 'vert']
+    hs = [line for line in long_lines if line.angle_type == 'horz']
+    diags = [line for line in long_lines if line.angle_type in ['pos-diag', 'neg-diag']] 
+    for vert_line in vs:
+        top_coord, bottom_coord = max(vert_line.coords, key=lambda c: c[1]), min(vert_line.coords, key=lambda c: c[1])
+        top_closest = closest_line(top_coord, diags)
+        bottom_closest = closest_line(bottom_coord, diags)
+        if valid_triangle(vert_line, top_closest, bottom_closest):
+            direction = which_side(vert_line, top_closest)
+            triangles.append(Triangle(vert_line, direction))
+            for line in (top_closest, bottom_closest, vert_line):
+                to_remove.append(line)
+#                lines.remove(line)
+    for horz_line in hs:
+        left_coord, right_coord = max(horz_line.coords, key=lambda c: c[0]), min(vert_line.coords, key=lambda c: c[0])
+        left_closest, right_closest = closest_line(left_coord, diags), closest_line(right_coord, diags)
+        if valid_triangle(horz_line, left_closest, right_closest):
+            direction = which_side(horz_line, left_closest)
+            triangles.append(Triangle(horz_line, direction))
+            for line in (left_closest, right_closest, horz_line):
+                to_remove.append(line)
+#                lines.remove(line)
+    for removable in set(to_remove):
+        lines.remove(removable)
+    return triangles
+            
+
+
 
 ### CIRCLE SECTION ###
 
@@ -197,7 +276,7 @@ def find_circles(file_name, show_circles=False):
     """
     return find_shape(file_name, 'circle', show_shapes=show_circles)
 
-def circle_hough(image, max_circles=100):
+def circle_hough(image, max_circles=float('inf')):
     """ Uses scikit-image's Hough circle transform to identify circles in an image.
 
     image: numpy image including circles
@@ -207,20 +286,18 @@ def circle_hough(image, max_circles=100):
     # Find edges
     edges = feature.canny(image, sigma=0.5, low_threshold=0.2, high_threshold=0.3, use_quantiles=True)
     # Detect radii through Hough transform
-    if max_circles != 100:
-        min_rad, max_rad = int(0.05 * np.mean(image.shape)), 0.1 * np.mean(image.shape)
-    else:
-        min_rad, max_rad = int(0.05 * np.mean(image.shape)), 0.1 * np.mean(image.shape)
+    min_rad, max_rad = int(0.05 * np.mean(image.shape)), 0.1 * np.mean(image.shape)
 
     rad_range = np.arange(min_rad, max_rad, (max_rad - min_rad) // 20)
     accum = transform.hough_circle(edges, rad_range)
-    accums, cx, cy, radii = transform.hough_circle_peaks(accum, rad_range, min_xdistance=100, min_ydistance=100, threshold=0.85*np.max(accum), num_peaks=max_circles)
+#    accums, cx, cy, radii = transform.hough_circle_peaks(accum, rad_range, min_xdistance=100, min_ydistance=100, threshold=0.85*np.max(accum), num_peaks=max_circles)
+    accums, cx, cy, radii = transform.hough_circle_peaks(accum, rad_range, min_xdistance=100, min_ydistance=100, threshold=0.85*np.max(accum))
     all_circles = [Circle(cx[i], cy[i], radii[i]) for i in range(len(cx))]
-    filtered_circles = filter_circles(all_circles)
-    keep_largest = sorted(filtered_circles, key=lambda c: c.radius)[0:max_circles]
-    return keep_largest
+    filtered_circles = filter_circles(all_circles, max_circles)
+    print(len(filtered_circles))
+    return filtered_circles
 
-def filter_circles(list_of_circles, d=150):
+def filter_circles(list_of_circles, num_circles, d=150):
     """ min_xdistance and min_ydistance of hough_circle_peaks do not work; this substitutes for that functionality
 
     Returns a list (cxs, cys, radii) where all centers are at least d distance apart.
@@ -240,7 +317,7 @@ def filter_circles(list_of_circles, d=150):
         lst.remove(max_circle)
         final = [max_circle] + filter_helper(lst)
         return final
-    return filter_helper(list_of_circles)
+    return filter_helper(list_of_circles)[0:num_circles]
     
 class Circle:
     """A circle has coordinates and a radius."""
@@ -279,7 +356,8 @@ class Coord:
         self.y = y
 
 class Line:
-    """ A line segment expressed by the Cartesian coordinates of its endpoints"""
+    """ A line segment expressed by the Cartesian coordinates of its endpoints.
+    Note that the visualized version of a line will be flipped vertically, so positive diagonal will look like negative diagonal."""
 
     def __init__(self, x0, y0, x1, y1):
         self.x0 = x0
@@ -397,7 +475,7 @@ class Triangle:
     def __init__(self, base_line, direction):
         # Note: direction marks where the vertex opposite the base line points (left, right, up or down)
         self.base_line = base_line
-        self.direction == direction
+        self.direction = direction
         if base_line.angle_type == 'horz':
             assert direction in ['up', 'down'], 'Direction must be perpendicular to the base line'
         elif base_line.angle_type == 'vert':
@@ -405,19 +483,19 @@ class Triangle:
         else:
             raise AssertionError('Invalid direction')
         if self.direction == 'up':
-            vertex = (self.base_line.center[0], int(self.base_line.center[1] - self.base_line.length * np.sqrt(3) / 2))
+            self.vertex = (self.base_line.center[0], int(self.base_line.center[1] - self.base_line.length * np.sqrt(3) / 2))
         elif self.direction == 'down':
-            vertex = (self.base_line.center[0], int(self.base_line.center[1] + self.base_line.length * np.sqrt(3) / 2))
+            self.vertex = (self.base_line.center[0], int(self.base_line.center[1] + self.base_line.length * np.sqrt(3) / 2))
         elif self.direction == 'left':
-            vertex = (self.base_line.center[0] - int(self.base_line.length * np.sqrt(3) / 2), self.base_line.center[1])
+            self.vertex = (self.base_line.center[0] - int(self.base_line.length * np.sqrt(3) / 2), self.base_line.center[1])
         elif self.direction == 'right':
-            vertex = (self.base_line.center[0] + int(self.base_line.length * np.sqrt(3) / 2), self.base_line.center[1])
+            self.vertex = (self.base_line.center[0] + int(self.base_line.length * np.sqrt(3) / 2), self.base_line.center[1])
 
     def draw(self, image, color=(220, 20, 20)):
         """ Destructively draws the triangle onto the image. """
         self.base_line.draw(image)
-        Line.from_coords(self.vertex, ref_line.coords[0]).draw(image)
-        Line.from_coords(self.vertex, ref_line.coords[1]).draw(image)
+        Line.from_coords(self.vertex, self.base_line.coords[0]).draw(image)
+        Line.from_coords(self.vertex, self.base_line.coords[1]).draw(image)
         
 
 
@@ -425,7 +503,8 @@ simple = './ex_circuits/easy_circuit.jpg'
 two_circles = './ex_circuits/two_circles.jpg'
 three_circles = './ex_circuits/three_circles.jpg'
 integrator = './ex_circuits/integrator.jpg'
+better_integrator = './ex_circuits/better_integrator.jpg'
 differentiator = './ex_circuits/differentiator.jpg'
 
 # UNCOMMENT THIS LINE TO TEST (you can replace the file name with the others if you prefer)
-# lines = find_all(differentiator)
+# triangles = find_all(better_integtrator)
