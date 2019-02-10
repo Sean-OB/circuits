@@ -1,4 +1,13 @@
 from sympy import *
+from imag_processing import *
+
+def analyze_image(image_shapes):
+    """ Takes an Image object (detailed in image_processing.py) as an argument.
+    Detects circuit elements from the given shapes.
+    Links nearby elements together as much as possible.
+    Returns a Circuit object
+    """
+
 
 class Element:
     """ Master class that includes the attributes of each circuit element. All circuit elements inherit from this class.
@@ -51,5 +60,22 @@ class Element:
         output_string += 'Current: ' + str(self.curr) + '\n'
         output_string += 'Resistance: ' + str(self.res)
         return output_string
+
+class VSource(Element):
+    """ An ideal, Ohmic voltage source. """
+    def __init__(self, coord, name):
+        super().__init__(coord, name)
+
+class Wire:
+    """ An ideal wire - has zero resistance. """
+    def __init__(self, coord, name):
+        super().__init__(coord, name, res=0)
+        self.v_o = self.v_i
+
+class Circuit:
+    """ A collection of circuit elements, all linked in various ways. """
+    def __init__(self, wires, elements):
+        self.wires = wires
+        self.elements = elements
 
 
