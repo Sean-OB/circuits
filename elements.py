@@ -1,5 +1,5 @@
 from sympy import *
-from imag_processing import *
+from image_processing import *
 
 def analyze_image(image_shapes):
     """ Takes an Image object (detailed in image_processing.py) as an argument.
@@ -7,6 +7,7 @@ def analyze_image(image_shapes):
     Links nearby elements together as much as possible.
     Returns a Circuit object
     """
+
 
 
 class Element:

@@ -2,6 +2,7 @@ import matplotlib.pyplot as plt
 import imageio as img
 import numpy as np
 from skimage import draw, feature, filters, morphology, transform, util
+from geometry import *
 
 def find_all(file_name, num_sources=10, num_oas=5, printed=False):
     """Main function of this file. Identifies all structures in an image and returns them
@@ -10,20 +11,10 @@ def find_all(file_name, num_sources=10, num_oas=5, printed=False):
     circles = circle_hough(image, num_sources)
     lines = line_hough(image, printed=printed)
     original_lines = list(lines)
-    for circ in circles:
-        circ.classify(image, lines, printed=printed)
+    classify_circles(image, lines, circles, printed=printed)
     filtered_lines = consolidate_lines(lines, image, circles)
-    if printed:
-        mll, d_thresh = 0.05 * np.mean(image.shape), 0.03 * np.mean(image.shape)
-    else:
-        mll, d_thresh = 0.1 * np.mean(image.shape), 0.06 * np.mean(image.shape) 
-    triangles = find_triangles(filtered_lines, min_line_length=mll, dist_threshold=d_thresh, max_triangles=num_oas)
-    if not triangles:
-        print('no triangles found :(')
-    else:
-        print(len(triangles))
-        for triangle in triangles:
-            triangle.classify(image, filtered_lines, printed=printed)
+    triangles = process_triangles(image, filtered_lines, num_oas, printed=printed)
+    resistors = process_resistors(image, filtered_lines, printed=printed)
     drawn_image = draw_shapes([filtered_lines, circles, triangles], file_name)
     show(drawn_image)
     return Image(image, filtered_lines, circles, triangles)
@@ -91,8 +82,69 @@ def show_plot(file_name):
     image = bw_image(file_name)
     show(contrastify(edgify(image)))
 
-### POLISHING FUNCTIONS ###
+### ABSTRACTING FUNCTIONS ###
+# These are here so that the find_all function is readable
 
+
+def classify_circles(image, lines, circles, printed=False):
+    for circ in circles:
+        circ.classify(image, lines, printed=printed)
+
+def process_triangles(image, filtered_lines, num_oas, printed=False):
+    """ Detects and classifies all triangles in an image; returns a list of triangles """
+    if printed:
+        mll, d_thresh = 0.05 * np.mean(image.shape), 0.03 * np.mean(image.shape)
+    else:
+        mll, d_thresh = 0.1 * np.mean(image.shape), 0.06 * np.mean(image.shape) 
+    triangles = find_triangles(filtered_lines, min_line_length=mll, dist_threshold=d_thresh, max_triangles=num_oas)
+    if not triangles:
+        print('no triangles found :(')
+    else:
+        for triangle in triangles:
+            triangle.classify(image, filtered_lines, printed=printed)
+            print(triangle.orientation)
+            print()
+    return triangles
+
+def process_resistors(image, filtered_lines, printed=False):
+    """ Given processed lines, finds resistors and classifies their orientation.
+    NOTE: As of now resistors can either be vertical or horizontal.
+    TODO: Add functionality for diagonal resistors (Wheatstone bridge)"""
+    def closest_clusters(ref_line, clusters):
+        """ Returns the clusters (list) of lines which have at least one line sufficiently close to ref_line """
+        dist_func = lambda cluster: min_cluster_distance(ref_line, cluster) < dist_thresh
+        return list(filter(dist_func, clusters))
+        return min(clusters, key=lambda cluster: min_cluster_distance(ref_line, cluster), default=[])
+
+    def min_cluster_distance(ref_line, cluster):
+        """ Returns the smallest distance from any line in the cluster to the reference line """
+        dist_func = lambda line: ref_line.min_endpoint_dist(line)
+        return min(map(dist_func, cluster), default=float('inf'))
+
+    dist_thresh = np.mean(image.shape) * 0.1
+    print(dist_thresh)
+    diag_lines = [line for line in filtered_lines if line.angle_type in ('pos-diag', 'neg-diag')]
+    clusters = []
+    for line in diag_lines:
+        # Close
+        closest = closest_clusters(line, clusters)
+        if not closest:
+            clusters.append([line])
+        elif len(closest) == 1:
+            closest[0].append(line)
+        else:
+            big_cluster = []
+            for cluster in closest:
+                clusters.remove(cluster)
+                big_cluster.extend(cluster)
+            clusters.append(big_cluster)
+    for cluster in clusters:
+        for line in cluster:
+            print(line)
+        print()
+            
+
+### K-MEANS SECTION ###
 
 
 ### LINE SECTION ###
@@ -176,15 +228,16 @@ def rect(ref_line, ld_width, ru_width, dist, disp=False):
         # Rectangle that is width wide from the center of the line in the direction of the first endpoint
         right_x, left_x= max(ref_line.x0, ref_line.x1), min(ref_line.x0, ref_line.x1)
         # look is a function that takes coordinates and returns whether they are in the rectangle
-        bl_corner = (left_x - dist, ref_line.center[1] - ld_width)
-        tr_corner = (right_x + dist, ref_line.center[1] + ru_width)
+        bl_corner = (left_x - dist, ref_line.center_coord[1] - ld_width)
+        tr_corner = (right_x + dist, ref_line.center_coord[1] + ru_width)
     elif ref_line.angle_type == 'vert':
         top_y, bottom_y  = max(ref_line.y0, ref_line.y1), min(ref_line.y0, ref_line.y1)
-        bl_corner = (ref_line.center[0] - ld_width, bottom_y - dist)
-        tr_corner = (ref_line.center[0] + ru_width, top_y + dist)
+        bl_corner = (ref_line.center_coord[0] - ld_width, bottom_y - dist)
+        tr_corner = (ref_line.center_coord[0] + ru_width, top_y + dist)
     def in_rect(coord):
         """ Determines if coord is within a rectangle spanned by 2 given corners. All coordinates are given in tuples. """
         return bl_corner[0] < coord[0] < tr_corner[0] and bl_corner[1] < coord[1] < tr_corner[1]
+    # This is just here for debugging
     if disp:
         print('BL corner ' + str(bl_corner))
         print('TR corner ' + str(tr_corner))
@@ -236,14 +289,14 @@ def find_triangles(lines, min_line_length=40, dist_threshold=55, max_triangles=f
         If the reference line is horizontal, then the test line could be 'up' or 'down'.
         If --------------------- vertical, ----------------------------'left' or 'right'."""
         if ref_line.angle_type == 'horz':
-            dy1, dy2 = test_line.coords[0][1] - ref_line.center[1], test_line.coords[1][1] - ref_line.center[1]
+            dy1, dy2 = test_line.coords[0][1] - ref_line.center_coord[1], test_line.coords[1][1] - ref_line.center_coord[1]
             farther = max([dy1, dy2], key=abs)
             if farther > 0:
                 return 'up'
             else:
                 return 'down'
         elif ref_line.angle_type == 'vert':
-            dx1, dx2 = test_line.coords[0][0] - ref_line.center[0], test_line.coords[1][0] - ref_line.center[0]
+            dx1, dx2 = test_line.coords[0][0] - ref_line.center_coord[0], test_line.coords[1][0] - ref_line.center_coord[0]
             farther = max([dx1, dx2], key=abs)
             if farther > 0:
                 return 'right'
@@ -254,6 +307,8 @@ def find_triangles(lines, min_line_length=40, dist_threshold=55, max_triangles=f
         """ Returns whether the lines form a valid triangle. """
         if (not lin1) or (not lin2):
             return False
+        return True
+
 
         check = lambda side1, side2: (which_side(ref_line, lin1) == side1 and which_side(ref_line, lin2) == side1 and lin1.angle_type == 'pos-diag' and lin2.angle_type == 'neg-diag') or (which_side(ref_line, lin1) == side2 and which_side(ref_line, lin2) == side2 and lin1.angle_type == 'neg-diag' and lin2.angle_type == 'pos-diag')
         if ref_line.angle_type == 'horz':
@@ -359,322 +414,6 @@ def filter_circles(list_of_circles, num_circles, d=150):
     spaced_circles = filter_helper(list_of_circles)
     return sorted(spaced_circles, key=lambda circ: circ.radius)[0:num_circles]
     
-class Circle:
-    """A circle has coordinates and a radius."""
-    # Until a direction is specified, it is set to None
-    direction = None
-    source_type = None
-
-    def __init__(self, x, y, radius):
-        self.x = int(x)
-        self.y = int(y)
-        self.radius = int(radius)
-
-    @property
-    def center_coord(self):
-        """ Returns a tuple of the center coordinates of the circle. """
-        return (self.x, self.y)
-
-    def __str__(self):
-        return 'x: {0}, y: {1}, r: {2}'.format(self.x, self.y, self.radius)
-
-    def distance_to(self, circ2):
-        return np.sqrt((self.x - circ2.x) ** 2 + (self.y - circ2.y) ** 2)
-
-    @property
-    def access_points(self):
-        """ Returns the points at which a wire can connect to this source. """
-        assert self.direction in ['up', 'down', 'left', 'right'], 'Direction must be defined!'
-        if self.direction in ['up', 'down']:
-            return ((self.x, self.y + self.radius), (self.x, self.y - radius))
-        else:
-            return ((self.x - self.radius, self.y), (self.x + self.radius, self.y))
-
-    def coord_close_to_circle(self, coord, min_rad_rat, max_rad_rat):
-        """ Returns whether a coordinate is between min_rad_rat * radius and max_rad_rad * radius of the center """
-        assert max_rad_rat >= min_rad_rat, 'Maximum ratio must be larger or equal to the minimum ratio!'
-        return self.radius * min_rad_rat < Line.coord_dist(coord, self.center_coord) < self.radius * max_rad_rat
-
-    def classify(self, image, lines, printed=False):
-        """ Classifies both the direction and the type of a circle (source) """
-        self.classify_direction(image, lines, printed=printed)
-        self.classify_type(image, lines, printed=printed)
-
-    def classify_direction(self, image, lines, printed=False):
-        """ Divides the circle into four triangles.
-        Finds the maximum sum of pixels in each of the four triangles; the direction of the 'busiest'
-        triangle is the direction that the source points in.
-        """
-        if printed:
-            new_radius = self.radius
-        else:
-            new_radius = int(self.radius * 1.3)
-        up_y = np.array([self.y, self.y, self.y + new_radius])
-        up_x = np.array([self.x - new_radius, self.x + new_radius, self.x])
-        up = (up_y, up_x)
-
-        down_y = np.array([self.y, self.y, self.y - new_radius])
-        down_x = np.array([self.x - new_radius, self.x + new_radius, self.x])
-        down = (down_y, down_x)
-
-        left_y = np.array([self.y - new_radius, self.y + new_radius, self.y])
-        left_x = np.array([self.x, self.x, self.x - new_radius])
-        left = (left_y, left_x)
-
-        right_y = np.array([self.y - new_radius, self.y + new_radius, self.y])
-        right_x = np.array([self.x, self.x, self.x + new_radius])
-        right = (right_y, right_x)
-
-        max_direction = max([up, down, left, right], key=lambda key_coords: np.sum(image[key_coords[0], key_coords[1]]))
-        if max_direction is up:
-            self.direction = 'up'
-        elif max_direction is down:
-            self.direction = 'down'
-        elif max_direction is left:
-            self.direction = 'left'
-        else:
-            self.direction = 'right'
-
-    def classify_type(self, image, lines, printed=False):
-        """ Knowing a circle's direction, determines whether it is a current or voltage source. """
-        in_circle = [line for line in lines if self.coord_in_circle(line.coords[0]) and self.coord_in_circle(line.coords[1])]
-        avg_length = np.mean([line.length for line in in_circle])
-        print(avg_length)
-        long_in_circle = [line for line in in_circle if line.length > (avg_length / 2)]
-        print(long_in_circle)
-
-        num_diags = len([line for line in long_in_circle if line.angle_type in ['pos-diag', 'neg-diag']])
-        enough_diags = (num_diags / len(long_in_circle)) > 0.2
-        longest_line = max(long_in_circle, key=lambda line: line.length)
-        longest_lines_up = (longest_line.angle_type == 'horz' and self.direction in ['left, right']) or (longest_line.angle_type == 'vert' and self.direction in ['up', 'down'])
-        for line in in_circle:
-            lines.remove(line)
-        self.remove_close_lines(lines)
-        if enough_diags and longest_lines_up:
-            self.source_type = 'current'
-        else:
-            self.source_type = 'voltage'
-
-    def remove_close_lines(self, lines, min_rat=0.6, max_rat=1.4):
-        """ Destructively removes any line that with both endpoints close to the edge of the circle. """
-        to_remove = []
-        for line in lines:
-            if self.coord_close_to_circle(line.coords[0], min_rat, max_rat) and self.coord_close_to_circle(line.coords[1], min_rat, max_rat):
-                to_remove.append(line)
-        for line in to_remove:
-            lines.remove(line)
-
-    def coord_in_circle(self, coord):
-        """ Returns whether or not a coordinate is within the boundary of a circle """
-        return Line.coord_dist(coord, self.center_coord) < self.radius
-        
-
-    def draw(self, image, color=(220, 20, 20)):
-        """ Destructively draws the circle onto a given image. """
-        cy, cx = draw.circle_perimeter(self.y, self.x, self.radius)
-        image[cy, cx] = color
-
-class Coord:
-    """ A 2-dimensional coordinate. """
-    
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-
-class Line:
-    """ A line segment expressed by the Cartesian coordinates of its endpoints.
-    Note that the visualized version of a line will be flipped vertically, so positive diagonal will look like negative diagonal."""
-
-    def __init__(self, x0, y0, x1, y1):
-        self.x0 = x0
-        self.y0 = y0
-        self.x1 = x1
-        self.y1 = y1
-
-    def __str__(self):
-        return '({0}, {1}), ({2}, {3})'.format(self.x0, self.y0, self.x1, self.y1)
-
-    @property
-    def angle(self):
-        if self.x0 - self.x1 == 0:
-            return 90
-        else:
-            raw_angle = np.arctan((self.y0 - self.y1) / (self.x0 - self.x1)) * 180 / np.pi
-            if -90 <= raw_angle < -67.5 or raw_angle >= 67.5:
-                return 90
-            elif -67.5 <= raw_angle < -22.5:
-                return -45
-            elif -22.5 <= raw_angle < 22.5:
-                return 0
-            elif 22.5 <= raw_angle < 67.5:
-                return 45
-
-    @property
-    def slope(self):
-        if self.x0 - self.x1 == 0:
-            return float('inf')
-        else:
-            return (self.y0 - self.y1) / (self.x0 - self.x1)
-
-    @property
-    def angle_type(self):
-        if self.angle == 90:
-            return 'vert'
-        elif -67.5 <= self.angle < -22.5:
-            return 'neg-diag'
-        elif -22.5 <= self.angle < 22.5:
-            return 'horz'
-        elif 22.5 <= self.angle < 67.5:
-            return 'pos-diag'
-
-    @property
-    def coords(self):
-        """ Returns the coordinates of endpoints in the format ((x0, y0), (x1, y1)) """
-        return ((self.x0, self.y0), (self.x1, self.y1))
-
-    @property
-    def center(self):
-        return ((self.x0 + self.x1) // 2, (self.y0 + self.y1) // 2)
-
-    @property
-    def length(self):
-        """ Returns the Euclidean length of the line """
-        dx, dy = self.x1 - self.x0, self.y1 - self.y0
-        return np.sqrt(dx ** 2 + dy ** 2)
-
-    def from_polar(d0, a0, d1, a1, starting=(0, 0)):
-        """ Angles are in radians """
-        x0 = starting[0] + d0 * np.cos(a0)
-        y0 = starting[1] + d0 * np.sin(a0)
-        x1 = starting[0] + d1 * np.cos(a1)
-        y1 = starting[1] + d1 * np.sin(a1)
-        return Line(x0, y0, x1, y1)
-
-    def from_coords(c0, c1):
-        """ Coordinates are an unpackable pair, preferably a tuple """
-        x0, y0 = c0
-        x1, y1 = c1
-        return Line(x0, y0, x1, y1)
-
-    def min_endpoint_dist(self, line):
-        """ Returns the minimum distance between the endpoints of two lines """
-        dists = []
-        for i in range(2):
-            for j in range(2):
-                dists.append(Line.coord_dist(self.coords[i], line.coords[j]))
-        return min(dists)
-
-    def join_lines(self, line):
-        """ Returns the combination of two lines together at their closest endpoint """
-        # Farthest endpoints are formatted as a tuple of coordinate tuples
-        farthest_endpoints = max([self.coords, line.coords], key=lambda cs: Line.coord_dist(cs[0], cs[1]))
-        farthest_distance = Line.coord_dist(farthest_endpoints[0], farthest_endpoints[1])
-        assert self.angle_type == line.angle_type, 'Line angles must be of the same type!'
-        for i in range(2):
-            for j in range(2):
-                if Line.coord_dist(self.coords[i], line.coords[j]) > farthest_distance:
-                    farthest_endpoints = (self.coords[i], line.coords[j])
-                    farthest_distance = Line.coord_dist(self.coords[i], line.coords[j])
-        
-        if self.angle_type == 'horz':
-            avg_y = (farthest_endpoints[0][1] + farthest_endpoints[1][1]) // 2
-            return Line(farthest_endpoints[0][0], avg_y, farthest_endpoints[1][0], avg_y)
-        elif self.angle_type == 'vert':
-            avg_x = (farthest_endpoints[0][0] + farthest_endpoints[1][0]) // 2
-            return Line(avg_x, farthest_endpoints[0][1], avg_x, farthest_endpoints[1][1])
-        else:
-            return Line.from_coords(farthest_endpoints[0], farthest_endpoints[1])
-        
-
-    def coord_dist(c0, c1):
-        """ c0 and c1 are coordinate tuples of the form (x, y) """
-        return np.sqrt((c0[0] - c1[0]) ** 2 + (c0[1] - c1[1]) ** 2)
-
-    def draw(self, image, color=(220, 20, 20)):
-        """ Destructively draws line onto an image. """
-        image[draw.line(self.y0, self.x0, self.y1, self.x1)] = color
-
-
-
-class Triangle:
-    """ Represents an equilateral triangle in coordinate space, with a base perp/parallel to the two elementary axes of 2-D space. """
-    def __init__(self, base_line, direction):
-        # Note: direction marks where the vertex opposite the base line points (left, right, up or down)
-        self.base_line = base_line
-        self.size = self.base_line.length
-        self.direction = direction
-        if base_line.angle_type == 'horz':
-            assert direction in ['up', 'down'], 'Direction must be perpendicular to the base line'
-        elif base_line.angle_type == 'vert':
-            assert direction in ['left', 'right'], 'Direction must be perpendicular to the base line'
-        else:
-            raise AssertionError('Invalid direction')
-        if self.direction == 'up':
-            self.vertex = (self.base_line.center[0], int(self.base_line.center[1] - self.base_line.length * np.sqrt(3) / 2))
-        elif self.direction == 'down':
-            self.vertex = (self.base_line.center[0], int(self.base_line.center[1] + self.base_line.length * np.sqrt(3) / 2))
-        elif self.direction == 'left':
-            self.vertex = (self.base_line.center[0] - int(self.base_line.length * np.sqrt(3) / 2), self.base_line.center[1])
-        elif self.direction == 'right':
-            self.vertex = (self.base_line.center[0] + int(self.base_line.length * np.sqrt(3) / 2), self.base_line.center[1])
-
-    def classify(self, image, lines, printed=False):
-        """ Classifies whether an op-amp is in clockwise or counterclockwise orientation.
-        Orientation is defined here as + to output to -
-        For example, a triangle pointing upwards is in clockwise orientation if the + is on the left and the - is on the right.
-        """
-        width = np.mean(image.shape) * 0.08
-        min_length = 0.04 * self.base_line.length
-        # Creating the look functions
-        if self.direction in ['left', 'down']:
-            rectangle = rect(self.base_line, width, 0, 0)
-        else:
-            rectangle = rect(self.base_line, 0, width, 0)
-        close_lines = list(filter(lambda l: rectangle(l.coords[0]) and rectangle(l.coords[1]), lines))
-        # Looking for lines that are parallel to the base line of the triangle
-        if self.direction in ['left', 'right']:
-            look = lambda line: all([rectangle(c) for c in line.coords]) and line.angle_type == 'vert' and line.length > min_length
-        else:
-            look = lambda line: all([rectangle(c) for c in line.coords]) and line.angle_type == 'horz' and line.length > min_length
-        polarity_marks = list(filter(look, close_lines))
-        for line in close_lines:
-            lines.remove(line)
-        self.remove_close_lines(lines)
-        for line in polarity_marks:
-            print(line)
-
-    def remove_close_lines(self, lines):
-        if self.direction in ['right', 'up']:
-            rectangle = rect(self.base_line, 10, self.size, 5, disp=True)
-        elif self.direction == ['left', 'down']:
-            rectangle = rect(self.base_line, self.size, 10, 5, disp=True)
-        to_remove = []
-        for line in lines:
-            if rectangle(line.coords[0]) and rectangle(line.coords[1]):
-                to_remove.append(line)
-        for line in to_remove:
-            lines.remove(line)
-
-    def __str__(self):
-        return 'Direction: {}\nBase line: {}\n Vertex: {}'.format(self.direction, self.base_line, self.vertex)
-
-    def draw(self, image, color=(220, 20, 20)):
-        """ Destructively draws the triangle onto the image. """
-        self.base_line.draw(image)
-        Line.from_coords(self.vertex, self.base_line.coords[0]).draw(image)
-        Line.from_coords(self.vertex, self.base_line.coords[1]).draw(image)
-        
-class Image:
-    """ Represents a full circuit image, after analysis.
-    This is the value returned by this file. """
-
-    def __init__(self, image, lines, circles, triangles):
-        self.image = image
-        self.lines = lines
-        self.circles = circles
-        self.triangles = triangles
-
-
 simple = './ex_circuits/easy_circuit.jpg'
 two_circles = './ex_circuits/two_circles.jpg'
 three_circles = './ex_circuits/three_circles.jpg'
@@ -686,4 +425,4 @@ printed_oa = './ex_circuits/printed_oa.jpg'
 printed_oa_current = './ex_circuits/printed_oa_current.jpg'
 
 # UNCOMMENT THIS LINE TO TEST (you can replace the file name with the others if you prefer)
-image = find_all(printed_simple, printed=True, num_sources=1)
+image = find_all(better_integrator, printed=False, num_sources=1)
